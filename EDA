@@ -1,0 +1,395 @@
+#1.读取数据
+# 加载必要的库
+library(DESeq2)
+library(readr)
+library(tidyverse)
+
+# 读取数据文件
+counts_all <- read_csv('counts_all.csv')
+samplesheet <- read_csv('Gat201_samplesheet.csv')
+
+# 将tibble转换为data frame
+counts_all <- as.data.frame(counts_all)
+samplesheet <- as.data.frame(samplesheet)
+
+# 设置行名
+rownames(counts_all) <- counts_all$Geneid
+#去除包含0的行，某行人意数据包含0 都不行，视为异常值，直接去除
+filtered_counts_all<-counts_all[rowSums(counts_all ==0) ==0,]
+counts_all_without_names <- counts_all[,c(-1,-2,-3,-4,-5,-6)]
+
+# 样本表格设置行名
+rownames(samplesheet) <- samplesheet$Title
+samplesheet_without_ids <- samplesheet[,c(-1,-2,-3,-6,-8)]
+# 将必要的列转换为因子类型
+samplesheet_without_ids$GAT201 <- as.factor(samplesheet_without_ids$GAT201)
+samplesheet_without_ids$Condition <- as.factor(samplesheet_without_ids$Condition)
+samplesheet_without_ids$BioRep <- as.factor(samplesheet_without_ids$BioRep)
+#samplesheet_without_ids$Strain <- as.factor(samplesheet_without_ids$Strain)
+#samplesheet_without_ids$Time <- as.factor(samplesheet_without_ids$Time)
+
+
+#3.数据探索性分析
+
+# 创建DESeq2对象
+dds <- DESeqDataSetFromMatrix(countData = counts_all_without_names,
+                              colData = samplesheet_without_ids,
+                              design = ~ GAT201 + Condition +  BioRep)
+
+# 过滤掉低表达基因
+dds <- dds[rowSums(counts(dds)) > 10,]
+
+# 运行DESeq2进行标准化和差异表达分析
+dds <- DESeq(dds)
+
+# 进行方差稳定变换
+vsd <- vst(dds, blind = FALSE)
+
+# 提取两次复制的样本
+replicate1_samples <- rownames(samplesheet_without_ids[samplesheet_without_ids$BioRep == 1, ])
+replicate2_samples <- rownames(samplesheet_without_ids[samplesheet_without_ids$BioRep == 2, ])
+replicate1_data <- assay(vsd)[, replicate1_samples]
+replicate2_data <- assay(vsd)[, replicate2_samples]
+
+```
+
+```{r}
+#层级一：计算inter-gene之间两次复制之间的相关系数
+cor_matrix <- cor(assay(vsd)[, replicate1_samples], assay(vsd)[, replicate2_samples])
+
+# 提取对角线元素
+diag_cor <- diag(cor_matrix)
+
+# 平均相关系数
+mean_cor <- mean(diag_cor)
+print(mean_cor)
+
+
+# 绘制热图
+library(pheatmap)
+pheatmap(cor_matrix, clustering_distance_rows = "correlation", clustering_distance_cols = "correlation", main = "Inter-gene Correlation Matrix")
+```
+
+```{r}
+#层级二：计算intra-gene之间两次复制之间的相关关系
+#也就是计算每个基因之间的相关系数
+# 计算每个基因的相关系数
+calculate_gene_correlation <- function(replicate1_data, replicate2_data, gene_names) {
+  gene_correlations <- numeric(length(gene_names))
+  
+  for (i in 1:length(gene_names)) {
+    gene <- gene_names[i]
+    data1 <- replicate1_data[gene, ]
+    data2 <- replicate2_data[gene, ]
+    
+    gene_correlations[i] <- cor(data1, data2)
+  }
+  
+  names(gene_correlations) <- gene_names
+  return(gene_correlations)
+}
+
+gene_correlations <- calculate_gene_correlation(replicate1_data, replicate2_data, rownames(replicate1_data))
+#把相关系数的值取出来
+gene_correlations01 <- as.data.frame(gene_correlations)
+# 绘制箱线图
+boxplot(gene_correlations, main = "Intra-gene Correlation Coefficients", ylab = "Correlation Coefficient")
+
+# 识别低相关性基因
+threshold <- quantile(gene_correlations, 0.05)
+low_correlation_genes <- names(gene_correlations[gene_correlations < threshold])
+low_correlation_genes01 <- as.data.frame(low_correlation_genes)
+
+# 提取低相关性基因及其对应的相关系数
+low_correlation_genes_df <- data.frame(
+  Gene = names(gene_correlations[low_correlation_genes]),
+  Correlation = gene_correlations[low_correlation_genes]
+)
+
+# 查看数据框内容
+print(low_correlation_genes_df)
+# 导出为CSV文件
+write.csv(low_correlation_genes_df, "low_correlation_genes.csv", row.names = FALSE)
+
+# 打印提示信息
+print("低相关性基因及其相关系数已导出为 low_correlation_genes.csv")
+
+
+threshold02 <- 0.75
+low_correlation_genes02 <- names(gene_correlations[gene_correlations < threshold02])
+# 提取低相关性基因及其对应的相关系数
+low_correlation_genes_df02 <- data.frame(
+  Gene = names(gene_correlations[low_correlation_genes02]),
+  Correlation = gene_correlations[low_correlation_genes02]
+)
+
+# 导出为CSV文件
+write.csv(low_correlation_genes_df02, "low_correlation_genes02.csv", row.names = FALSE)
+```
+
+```{r}
+#探索是否存在系统性偏差
+#低相关性的基因个数占总体的约25%，太多了
+# 提取低相关性基因在两次复制中的表达数据
+low_correlation_replicate1_data <- replicate1_data[low_correlation_genes02, ]
+low_correlation_replicate2_data <- replicate2_data[low_correlation_genes02, ]
+
+# 计算表达差异
+expression_diff <- rowMeans(low_correlation_replicate1_data) - rowMeans(low_correlation_replicate2_data)
+expression_diff_df <- data.frame(
+  Gene = low_correlation_genes02,
+  ExpressionDiff = expression_diff
+)
+
+# 查看前几行数据
+head(expression_diff_df)
+# 创建长格式数据框
+expression_diff_long <- data.frame(
+  Gene = rep(low_correlation_genes02, 2),
+  Expression = c(rowMeans(low_correlation_replicate1_data), rowMeans(low_correlation_replicate2_data)),
+  Replicate = rep(c("Replicate1", "Replicate2"), each = length(low_correlation_genes02))
+)
+
+# 绘制箱线图
+ggplot(expression_diff_long, aes(x = Replicate, y = Expression, fill = Replicate)) +
+  geom_boxplot() +
+  labs(title = "Expression Differences of Low Correlation Genes",
+       x = "Replicate",
+       y = "Expression Level") +
+  theme_minimal()
+
+# 绘制差异直方图
+ggplot(expression_diff_df, aes(x = ExpressionDiff)) +
+  geom_histogram(binwidth = 0.1, fill = "blue", alpha = 0.7) +
+  labs(title = "Histogram of Expression Differences",
+       x = "Expression Difference",
+       y = "Frequency") +
+  theme_minimal()
+
+```
+
+```{r}
+# 提取标准化后的数据
+normalized_counts <- assay(vsd)
+# 进行PCA分析
+pca_res <- prcomp(t(normalized_counts))
+
+# 提取前两个主成分
+pca_data <- as.data.frame(pca_res$x)
+pca_data$Condition <- rownames(pca_data)
+
+# 可视化PCA结果
+library(ggplot2)
+ggplot(pca_data, aes(x = PC1, y = PC2, color = Condition)) +
+  geom_point(size = 3) +
+  labs(title = "PCA of Gene Expression Data",
+       x = "Principal Component 1",
+       y = "Principal Component 2") +
+  theme_minimal()
+
+#把不同的组给写出来
+# 设置k值为4，因为图中看起来有四个聚类
+set.seed(123)  # 设置随机种子以确保结果可重复
+k <- 4
+kmeans_res <- kmeans(pca_data[, 1:2], centers = k)
+
+# 将聚类结果添加到数据框中
+pca_data$Cluster <- as.factor(kmeans_res$cluster)
+
+# 可视化PCA结果并标注聚类
+ggplot(pca_data, aes(x = PC1, y = PC2, color = Cluster, label = Condition)) +
+  geom_point(size = 3) +
+  geom_text(vjust = -1, size = 3) +
+  labs(title = "PCA of Gene Expression Data with K-means Clustering",
+       x = "Principal Component 1",
+       y = "Principal Component 2") +
+  theme_minimal()
+
+
+# 列出每个聚类的条件名称
+cluster_conditions <- split(pca_data$Condition, pca_data$Cluster)
+
+# 打印每个聚类的条件名称
+for (i in 1:k) {
+  cat("Cluster", i, "conditions:\n")
+  print(cluster_conditions[[i]])
+  cat("\n")
+}
+
+```
+
+```{r}
+#Q1
+#1. 分析单个基因的行为
+# 定义一个函数来提取和合并基因表达数据
+get_gene_data <- function(gene_name, dds) {
+  # 提取基因表达数据
+  gene_expression <- counts(dds)[gene_name, ]
+  
+  # 将表达数据和条件信息合并
+  gene_data <- data.frame(
+    Expression = gene_expression,
+    Condition = colnames(counts(dds))
+  )
+  
+  return(gene_data)
+}
+
+gene_data <- get_gene_data("CNAG_00016",dds)
+
+# 定义一个函数来绘制直方图
+plot_gene_expression <- function(gene_name, dds) {
+  # 获取基因数据
+  gene_data <- get_gene_data(gene_name, dds)
+  # 确保Condition列是因子类型并按照原始数据顺序排序
+  gene_data$Condition <- factor(gene_data$Condition, levels = unique(gene_data$Condition))
+  
+  # 提取Condition的倒数第二个数字
+  gene_data$Time <- as.numeric(sub(".*_(\\d+)_.*", "\\1", gene_data$Condition))
+  
+  # 定义颜色
+  color_palette <- c("0" = "red", "30" = "yellow", "120" = "green", "240" = "blue")
+  
+  # 绘制条形图并优化
+  p <- ggplot(gene_data, aes(x = Condition, y = Expression, fill = as.factor(Time))) +
+    geom_bar(stat = "identity", alpha = 0.7) +
+    geom_text(aes(label = round(Expression, 2)), vjust = -0.5, size = 3) +
+    scale_fill_manual(values = color_palette, name = "Time") +
+    labs(title = paste("Expression of", gene_name, "across Conditions"),
+         x = "Condition",
+         y = "Expression Level") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          legend.position = "top")
+  
+  return(p)
+}
+plot_gene_expression("CNAG_00016",dds)
+```
+
+```{r}
+##################
+#探究不同基因在同一个条件下的表达行为
+#首先将第一次复制和第二次复制数据之间相关系数低于0.75的基因数据剔除掉，
+#因为这一部分是实验存在瑕疵的，不利于探究
+# 剔除低相关性基因
+filtered_counts <- counts(dds)[!rownames(counts(dds)) %in% low_correlation_genes02, ]
+filtered_dds <- dds[!rownames(dds) %in% low_correlation_genes02, ]
+
+#原始数据里面有6795个基因的数据，为什么经过VSD之后只有6756个基因的数据
+# 可能的原因
+# 低表达基因的过滤：
+# 
+# 在使用 DESeq2 进行分析时，通常会过滤掉低表达的基因。例如，代码中使用了 dds <- dds[rowSums(counts(dds)) > 10,] 来过滤掉那些在所有样本中总计数低于10的基因。这可能会导致基因数量减少。
+# 缺失数据处理：
+# 
+# 在某些预处理步骤中，如果某些基因在所有样本中均未被检测到（即计数为零），这些基因可能会被过滤掉。
+# 方差稳定变换（VSD）：
+# 
+# 在进行方差稳定变换时，DESeq2 可能会进一步过滤掉一些基因，特别是那些在大多数样本中均未检测到或表达水平极低的基因。
+
+# 进行方差稳定变换
+filtered_vsd <- vst(filtered_dds, blind = FALSE)
+
+# 进行方差稳定变换（Variance Stabilizing Transformation, VST）可以帮助我们更好地处理 RNA-seq 数据的一些特性，特别是在数据探索和可视化阶段。以下是进行 VST 的原因和它的作用：
+# 
+# 原因和作用
+# 标准化数据：RNA-seq 数据通常具有高度的变异性和广泛的动态范围。VST 可以标准化这些数据，使得不同样本之间的基因表达值更具可比性。
+# 
+# 减少噪声：在 RNA-seq 数据中，低表达基因通常具有较高的噪声水平。VST 可以减少这种噪声，使得基因表达水平更加稳定和可靠。
+# 
+# 适用于下游分析：VST 数据更适合用于下游的统计分析和可视化，例如主成分分析（PCA）、聚类分析等。
+
+colnames(assay(filtered_vsd))
+#查看列名防止出错
+test01 <- as.data.frame(assay(filtered_vsd)[,c("A_R_30_1","A_R_120_1","A_R_240_1")])
+Gene <- rownames(test01)
+test01 <- cbind(Gene,test01)
+
+
+# 加载必要的库
+library(ggplot2)
+library(readr)
+library(tidyr)
+library(dplyr)
+
+# # 将数据转换为长格式
+test01_long <- test01 %>%
+  pivot_longer(cols = -Gene, names_to = c("Condition1", "Condition2", "Time", "Replicate"),
+               names_pattern = "(.*)_([^_]+)_(\\d+)_(\\d+)$", values_to = "Expression") %>%
+  unite("Condition", Condition1, Condition2, sep = "_")
+
+# 确保 Time 是数值类型
+test01_long$Time <- factor(test01_long$Time, levels = c(30, 120, 240))
+# 绘制图表
+#plot_batch(test01_long)
+#数据量太大了，没法画出来，R卡住了
+
+
+#debug用的
+# # 查看转换后的数据结构
+# str(test01_long)
+# head(test01_long)
+
+# 绘制折线图的函数
+plot_expression_data <- function(data) {
+  p <- ggplot(data, aes(x = Time, y = Expression, color = Gene, group = Gene)) +
+    geom_line() +
+    geom_point() +
+    labs(title = "Expression of Genes across Time Points(A_R)",
+         x = "Time",
+         y = "Expression Level") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+  
+  return(p)
+}
+
+plot_expression_data(test01_long[1:36,])
+plot_expression_data(test01_long[37:72,])
+
+```
+
+```{r}
+# ######################################################
+# #探究 Find an appropriate (generalised) linear model for genes given design conditions.
+# # 提取结果
+res <- results(dds)
+# 
+# # 查看结果
+head(res)
+# # 提取每个因素的影响
+summary(res)
+# 
+# # 查看对比的条件
+res@elementMetadata
+# # 查看模型中的各个系数
+resultsNames(dds)
+res01 <- results(dds, contrast=c("GAT201", "WT", "del"))
+head(res01)
+summary(res01)
+
+res02 <- results(dds, contrast=c("Condition", "R", "RS"))
+head(res02)
+summary(res02)
+
+res03 <- results(dds, contrast=c("BioRep", 1, 2))
+head(res03)
+summary(res03)
+
+# # 绘制MA图
+plotMA(res01, ylim = c(-2, 2))
+# 
+# 绘制火山图
+# library(EnhancedVolcano)
+# EnhancedVolcano::EnhancedVolcano(res01,
+#                                  lab = rownames(res),
+#                                  x = 'log2FoldChange',
+#                                  y = 'pvalue',
+#                                  title = 'Volcano Plot for Differential Expression',
+#                                  pCutoff = 0.05,
+#                                  FCcutoff = 1.0,
+#                                  pointSize = 2.0,
+#                                  labSize = 3.0)
+
+```
