@@ -1,0 +1,744 @@
+---
+title: "RcodeQ2"
+author: "Ruxue Sun"
+date: "2024-07-29"
+output: html_document
+---
+
+# 2-mer
+
+```{r}
+library(readr)
+data_2mer <- read_csv("H99_all_genes_promoter_500nt_2mer_counts.csv",skip = 10)
+data_2mer <- as.data.frame(data_2mer)
+rownames(data_2mer) <- data_2mer$Gene
+data_2mer01 <- as.data.frame(scale(data_2mer[, -1])) 
+data_2mer01 <- cbind("Gene" = data_2mer$Gene,data_2mer01)
+
+merged_initial_expression <- read.csv("merged_initial_expression.csv")
+merged_initial_expression <- as.data.frame(merged_initial_expression)
+
+merged_data_2mer <- merge(merged_initial_expression, data_2mer01, by = "Gene")
+write.csv(merged_data_2mer,"merged_data_2mer.csv",row.names = FALSE)
+
+#筛选显著的motif
+# 构建线性混合效应模型
+response_2mer <- merged_data_2mer$Expression
+predictors_2mer <- merged_data_2mer[, c("initial_value",colnames(data_2mer)[-1])]  # 除去基因名列
+
+#使用LASSO回归选择合适的K-mer数据
+# 准备 LASSO 分析的数据
+library(glmnet)
+X <- as.matrix(merged_data_2mer[, c("initial_value",colnames(data_2mer)[-1])])
+y <- merged_data_2mer$Expression
+
+```
+
+```{r}
+###如果不经过任何处理直接进行LASSO筛选
+
+# 计算相关矩阵
+cor_matrix <- cor(X)
+
+library(caret)
+# 找到高度相关的特征（相关性大于0.9）
+high_cor_features <- findCorrelation(cor_matrix, cutoff = 0.6)
+
+# 移除高度相关的特征
+X_filtered <- X[, -high_cor_features]
+
+library(dplyr)
+#剔除反向互补的序列
+# 函数：生成反向互补序列
+reverse_complement <- function(sequence) {
+  complement <- chartr("ACGT", "TGCA", sequence)
+  return(paste(rev(strsplit(complement, NULL)[[1]]), collapse = ""))
+}
+
+# 函数：筛选不存在反向互补序列的K-mer
+filter_reverse_complements <- function(kmer_df) {
+  # 检查是否存在名为 "kmer" 的列
+  if (!"kmer" %in% colnames(kmer_df)) {
+    stop("数据框中不存在名为 'kmer' 的列")
+  }
+  
+  unique_kmers <- c()
+  seen_kmers <- c()
+  
+  for (kmer in kmer_df$kmer) {
+    rev_comp <- reverse_complement(kmer)
+    if (!(kmer %in% seen_kmers) && !(rev_comp %in% seen_kmers)) {
+      unique_kmers <- c(unique_kmers, kmer)
+      seen_kmers <- c(seen_kmers, kmer, rev_comp)
+    }
+  }
+  
+  # 返回筛选后的数据框
+  return(kmer_df %>% filter(kmer %in% unique_kmers))
+}
+
+filtered_2mer <- data.frame(kmer = colnames(X_filtered)[-1])
+filtered_2mer01 <- filter_reverse_complements(filtered_2mer)
+
+```
+
+```{r}
+# 执行PCA
+pca <- prcomp(X_filtered[,filtered_2mer01$kmer], scale. = TRUE)
+
+
+# 加载必要的库
+library(ggplot2)
+
+# 提取方差比例
+pca_var <- pca$sdev^2
+pca_var_ratio <- pca_var / sum(pca_var)
+
+# 创建数据框
+pca_var_df <- data.frame(PC = 1:length(pca_var_ratio), Variance = pca_var_ratio)
+
+# 绘制折线图
+ggplot(pca_var_df, aes(x = PC, y = Variance)) +
+  geom_line(color = "blue") +
+  geom_point(color = "blue") +
+  labs(title = "PCA Variance Explained", x = "Principal Component", y = "Variance Explained") +
+  theme_minimal()
+
+# 选择前几个主要成分
+num_components <- 4  # 选择前4个主要成分
+X_pca <- cbind(X_filtered[,1],pca$x[, 1:num_components])
+X_pca <- data.frame(X_pca)
+colnames(X_pca)[1] <- "Initial_value"
+write.csv(X_pca,"X_pca_2mer.csv",row.names = FALSE)
+
+# 使用交叉验证选择最优的alpha值和lambda值
+# 定义alpha值的序列
+alpha_values <- seq(0, 1, by = 0.01)
+
+# 初始化存储交叉验证结果的列表
+cv_results <- list()
+X_pca <- as.matrix(X_pca)
+
+# 对每个alpha值进行交叉验证
+for (alpha_val in alpha_values) {
+  cv_model <- cv.glmnet(X_pca, y, nfolds = 10, alpha = alpha_val)
+  cv_results[[as.character(alpha_val)]] <- cv_model
+}
+
+# 提取最优的alpha和对应的lambda值
+best_alpha <- NULL
+best_lambda <- NULL
+best_mse <- Inf
+
+for (alpha_val in alpha_values) {
+  cv_model <- cv_results[[as.character(alpha_val)]]
+  min_mse <- min(cv_model$cvm)
+  
+  if (min_mse < best_mse) {
+    best_mse <- min_mse
+    best_alpha <- alpha_val
+    best_lambda <- cv_model$lambda.min
+  }
+}
+lasso_result_2mer <- data.frame(name=c("alpha","lambda","mse"),value=c(best_alpha,best_lambda,best_mse))
+write.csv(lasso_result_2mer,"lasso_result_2mer.csv",row.names = FALSE)
+# 使用最佳alpha值和lambda值重新拟合模型
+lasso_result_2mer <- read.csv("lasso_result_2mer.csv")
+elastic_net_model <- glmnet(X_pca, y, alpha = best_alpha, lambda = best_lambda)
+
+# 输出模型系数
+coef(elastic_net_model)
+
+# 打印最佳的alpha和lambda值
+print(paste("Best alpha:", best_alpha))
+print(paste("Best lambda:", best_lambda))
+
+# 可视化结果
+plot(cv_results[[as.character(best_alpha)]])
+
+
+```
+
+我们可以确定最佳的λ值，使得模型在最优α值下达到最小的均方误差。通过这种方法，我们能够找到既简化模型又保证预测精度的最佳参数配置。
+
+```{r}
+# 加载必要的包
+library(knitr)
+library(xtable)
+
+# 示例数据
+# 假设你已经有X_filtered和filtered_2mer01数据框
+# 执行PCA
+pca <- prcomp(X_filtered[, filtered_2mer01$kmer], scale. = TRUE)
+
+# 提取PCA负荷矩阵
+loadings <- pca$rotation
+
+# 使用kable函数生成表格
+kable(loadings, format = "html", caption = "PCA负荷矩阵")
+
+# 或者使用xtable包生成表格
+loadings_table <- xtable(loadings, caption = "PCA负荷矩阵")
+print(loadings_table, type = "html")
+```
+
+# 3-mer
+
+```{r}
+library(readr)
+data_3mer <- read_csv("H99_all_genes_promoter_500nt_3mer_counts.csv",skip = 10)
+data_3mer <- as.data.frame(data_3mer)
+rownames(data_3mer) <- data_3mer$Gene
+data_3mer01 <- as.data.frame(scale(data_3mer[, -1])) 
+data_3mer01 <- cbind("Gene" = data_3mer$Gene,data_3mer01)
+
+merged_initial_expression <- read.csv("merged_initial_expression.csv")
+merged_initial_expression <- as.data.frame(merged_initial_expression)
+
+merged_data_3mer <- merge(merged_initial_expression, data_3mer01, by = "Gene")
+write.csv(merged_data_3mer,"merged_data_3mer.csv",row.names = FALSE)
+
+#筛选显著的motif
+# 构建线性混合效应模型
+response_3mer <- merged_data_3mer$Expression
+predictors_3mer <- merged_data_3mer[, c("initial_value",colnames(data_3mer)[-1])]  # 除去基因名列
+
+#使用LASSO回归选择合适的K-mer数据
+# 准备 LASSO 分析的数据
+library(glmnet)
+X <- as.matrix(merged_data_3mer[, c("initial_value",colnames(data_3mer)[-1])])
+y <- merged_data_3mer$Expression
+
+
+
+```
+
+```{r}
+###如果不经过任何处理直接进行LASSO筛选
+# 计算相关矩阵
+cor_matrix <- cor(X)
+
+library(caret)
+# 找到高度相关的特征（相关性大于0.6）
+high_cor_features <- findCorrelation(cor_matrix, cutoff = 0.6)
+
+# 移除高度相关的特征
+X_filtered <- X[, -high_cor_features]
+
+library(dplyr)
+#剔除反向互补的序列
+# 函数：生成反向互补序列
+reverse_complement <- function(sequence) {
+  complement <- chartr("ACGT", "TGCA", sequence)
+  return(paste(rev(strsplit(complement, NULL)[[1]]), collapse = ""))
+}
+
+# 函数：筛选不存在反向互补序列的K-mer
+filter_reverse_complements <- function(kmer_df) {
+  # 检查是否存在名为 "kmer" 的列
+  if (!"kmer" %in% colnames(kmer_df)) {
+    stop("数据框中不存在名为 'kmer' 的列")
+  }
+  
+  unique_kmers <- c()
+  seen_kmers <- c()
+  
+  for (kmer in kmer_df$kmer) {
+    rev_comp <- reverse_complement(kmer)
+    if (!(kmer %in% seen_kmers) && !(rev_comp %in% seen_kmers)) {
+      unique_kmers <- c(unique_kmers, kmer)
+      seen_kmers <- c(seen_kmers, kmer, rev_comp)
+    }
+  }
+  
+  # 返回筛选后的数据框
+  return(kmer_df %>% filter(kmer %in% unique_kmers))
+}
+
+filtered_3mer <- data.frame(kmer = colnames(X_filtered)[-1])
+filtered_3mer01 <- filter_reverse_complements(filtered_3mer)
+
+```
+
+```{r}
+# 执行PCA
+pca <- prcomp(X_filtered[,filtered_3mer01$kmer], scale. = TRUE)
+
+# 加载必要的库
+library(ggplot2)
+
+# 提取方差比例
+pca_var <- pca$sdev^2
+pca_var_ratio <- pca_var / sum(pca_var)
+
+# 创建数据框
+pca_var_df <- data.frame(PC = 1:length(pca_var_ratio), Variance = pca_var_ratio)
+
+# 绘制折线图
+ggplot(pca_var_df, aes(x = PC, y = Variance)) +
+  geom_line(color = "blue") +
+  geom_point(color = "blue") +
+  labs(title = "PCA Variance Explained", x = "Principal Component", y = "Variance Explained") +
+  theme_minimal()
+
+# 选择前几个主要成分
+num_components <- 4  # 选择前4个主要成分
+X_pca <- cbind(X_filtered[,1],pca$x[, 1:num_components])
+X_pca <- data.frame(X_pca)
+colnames(X_pca)[1] <- "Initial_value"
+write.csv(X_pca,"X_pca_3mer.csv",row.names = FALSE)
+
+# 使用交叉验证选择最优的alpha值和lambda值
+# 定义alpha值的序列
+alpha_values <- seq(0, 1, by = 0.01)
+
+# 初始化存储交叉验证结果的列表
+cv_results <- list()
+X_pca <- as.matrix(X_pca)
+
+# 对每个alpha值进行交叉验证
+for (alpha_val in alpha_values) {
+  cv_model <- cv.glmnet(X_pca, y, nfolds = 10, alpha = alpha_val)
+  cv_results[[as.character(alpha_val)]] <- cv_model
+}
+
+# 提取最优的alpha和对应的lambda值
+best_alpha <- NULL
+best_lambda <- NULL
+best_mse <- Inf
+
+for (alpha_val in alpha_values) {
+  cv_model <- cv_results[[as.character(alpha_val)]]
+  min_mse <- min(cv_model$cvm)
+  
+  if (min_mse < best_mse) {
+    best_mse <- min_mse
+    best_alpha <- alpha_val
+    best_lambda <- cv_model$lambda.min
+  }
+}
+lasso_result_3mer <- data.frame(name=c("alpha","lambda","mse"),value=c(best_alpha,best_lambda,best_mse))
+write.csv(lasso_result_3mer,"lasso_result_3mer.csv",row.names = FALSE)
+# 使用最佳alpha值和lambda值重新拟合模型
+elastic_net_model <- glmnet(X_pca, y, alpha = best_alpha, lambda = best_lambda)
+
+# 输出模型系数
+coef(elastic_net_model)
+
+# 打印最佳的alpha和lambda值
+print(paste("Best alpha:", best_alpha))
+print(paste("Best lambda:", best_lambda))
+
+# 可视化结果
+plot(cv_results[[as.character(best_alpha)]])
+
+
+```
+
+```{r}
+# 加载必要的包
+library(knitr)
+library(xtable)
+
+# 示例数据
+# 假设你已经有X_filtered和filtered_2mer01数据框
+# 执行PCA
+pca <- prcomp(X_filtered[,filtered_3mer01$kmer], scale. = TRUE)
+
+# 提取PCA负荷矩阵
+loadings <- pca$rotation
+
+# 使用kable函数生成表格
+kable(loadings, format = "html", caption = "PCA Loading Matrix")
+
+# 或者使用xtable包生成表格
+loadings_table <- xtable(loadings, caption = "PCA Loading Matrix")
+print(loadings_table, type = "html")
+```
+
+# 4-mer
+
+```{r}
+library(readr)
+data_4mer <- read_csv("H99_all_genes_promoter_500nt_4mer_counts.csv",skip=10)
+data_4mer <- as.data.frame(data_4mer)
+rownames(data_4mer) <- data_4mer$Gene
+data_4mer01 <- as.data.frame(scale(data_4mer[, -1])) 
+data_4mer01 <- cbind("Gene" = data_4mer$Gene,data_4mer01)
+
+merged_initial_expression <- read.csv("merged_initial_expression.csv")
+merged_initial_expression <- as.data.frame(merged_initial_expression)
+
+merged_data_4mer <- merge(merged_initial_expression, data_4mer01, by = "Gene")
+write.csv(merged_data_4mer,"merged_data_4mer.csv",row.names = FALSE)
+
+#筛选显著的motif
+# 构建线性混合效应模型
+response_4mer <- merged_data_4mer$Expression
+predictors_4mer <- merged_data_4mer[, c("initial_value",colnames(data_4mer)[-1])]  # 除去基因名列
+
+#使用LASSO回归选择合适的K-mer数据
+# 准备 LASSO 分析的数据
+library(glmnet)
+X <- as.matrix(merged_data_4mer[, c("initial_value",colnames(data_4mer)[-1])])
+y <- merged_data_4mer$Expression
+
+```
+
+```{r}
+###如果不经过任何处理直接进行LASSO筛选
+# 计算相关矩阵
+cor_matrix <- cor(X)
+
+library(caret)
+# 找到高度相关的特征（相关性大于0.9）
+high_cor_features <- findCorrelation(cor_matrix, cutoff = 0.6)
+
+# 移除高度相关的特征
+X_filtered <- X[, -high_cor_features]
+
+library(dplyr)
+#剔除反向互补的序列
+# 函数：生成反向互补序列
+reverse_complement <- function(sequence) {
+  complement <- chartr("ACGT", "TGCA", sequence)
+  return(paste(rev(strsplit(complement, NULL)[[1]]), collapse = ""))
+}
+
+# 函数：筛选不存在反向互补序列的K-mer
+filter_reverse_complements <- function(kmer_df) {
+  # 检查是否存在名为 "kmer" 的列
+  if (!"kmer" %in% colnames(kmer_df)) {
+    stop("数据框中不存在名为 'kmer' 的列")
+  }
+  
+  unique_kmers <- c()
+  seen_kmers <- c()
+  
+  for (kmer in kmer_df$kmer) {
+    rev_comp <- reverse_complement(kmer)
+    if (!(kmer %in% seen_kmers) && !(rev_comp %in% seen_kmers)) {
+      unique_kmers <- c(unique_kmers, kmer)
+      seen_kmers <- c(seen_kmers, kmer, rev_comp)
+    }
+  }
+  
+  # 返回筛选后的数据框
+  return(kmer_df %>% filter(kmer %in% unique_kmers))
+}
+
+filtered_4mer <- data.frame(kmer = colnames(X_filtered)[-1])
+filtered_4mer01 <- filter_reverse_complements(filtered_4mer)
+
+
+```
+
+```{r}
+# 执行PCA
+pca <- prcomp(X_filtered[,filtered_4mer01$kmer], scale. = TRUE)
+
+# 加载必要的库
+library(ggplot2)
+
+# 提取方差比例
+pca_var <- pca$sdev^2
+pca_var_ratio <- pca_var / sum(pca_var)
+
+# 创建数据框
+pca_var_df <- data.frame(PC = 1:length(pca_var_ratio), Variance = pca_var_ratio)
+
+# 绘制折线图
+ggplot(pca_var_df, aes(x = PC, y = Variance)) +
+  geom_line(color = "blue") +
+  geom_point(color = "blue") +
+  labs(title = "PCA Variance Explained", x = "Principal Component", y = "Variance Explained") +
+  theme_minimal()
+
+
+
+# 选择前几个主要成分
+# sum(pca_var_df$Variance[1:29])
+# [1] 0.4925558
+#系数都太小，根据画图结果可知，很分散，需要进一步筛选
+#先进行LASSO回归，根据LASSO回归的结果进行进一步筛选
+X_pca <- cbind(X_filtered[,1],pca$x)
+X_pca <- data.frame(X_pca)
+colnames(X_pca)[1] <- "Initial_value"
+write.csv(X_pca,"X_pca_4mer.csv",row.names = FALSE)
+
+# 使用交叉验证选择最优的alpha值和lambda值
+# 定义alpha值的序列
+alpha_values <- seq(0, 1, by = 0.01)
+
+# 初始化存储交叉验证结果的列表
+cv_results <- list()
+X_pca <- as.matrix(X_pca)
+
+# 对每个alpha值进行交叉验证
+for (alpha_val in alpha_values) {
+  cv_model <- cv.glmnet(X_pca, y, nfolds = 10, alpha = alpha_val)
+  cv_results[[as.character(alpha_val)]] <- cv_model
+}
+
+# 提取最优的alpha和对应的lambda值
+best_alpha <- NULL
+best_lambda <- NULL
+best_mse <- Inf
+
+for (alpha_val in alpha_values) {
+  cv_model <- cv_results[[as.character(alpha_val)]]
+  min_mse <- min(cv_model$cvm)
+  
+  if (min_mse < best_mse) {
+    best_mse <- min_mse
+    best_alpha <- alpha_val
+    best_lambda <- cv_model$lambda.min
+  }
+}
+lasso_result_4mer <- data.frame(name=c("alpha","lambda","mse"),value=c(best_alpha,best_lambda,best_mse))
+write.csv(lasso_result_4mer,"lasso_result_4mer.csv",row.names = FALSE)
+# 使用最佳alpha值和lambda值重新拟合模型
+elastic_net_model <- glmnet(X_pca, y, alpha = best_alpha, lambda = best_lambda)
+
+# 输出模型系数
+coef(elastic_net_model)
+```
+
+```{r}
+
+# 提取LASSO回归系数
+lasso_coefs <- coef(elastic_net_model)
+
+# 将系数转换为数据框并去掉截距项
+lasso_coefs_df <- as.data.frame(as.matrix(lasso_coefs))
+lasso_coefs_df <- lasso_coefs_df[c(-1,-2), , drop = FALSE]  # 去掉截距项
+
+# 按照系数的绝对值从大到小排序
+lasso_coefs_df$abs_coef <- abs(lasso_coefs_df[, 1])
+lasso_coefs_df <- lasso_coefs_df[order(-lasso_coefs_df$abs_coef), , drop = FALSE]
+
+# 累积解释的方差
+explained_variance <- cumsum(lasso_coefs_df$abs_coef / sum(lasso_coefs_df$abs_coef))
+
+# 画出各个自变量对总体方差的解释程度
+plot(explained_variance, type = "b", pch = 19, col = "blue",
+     xlab = "Number of Features", ylab = "Cumulative Explained Variance",
+     main = "Explained Variance by LASSO Features")
+
+# 添加y=0.8的虚线辅助线
+abline(h = 0.8, col = "red", lty = 2)
+# 添加y=0.6的虚线辅助线
+abline(h = 0.6, col = "red", lty = 2)
+
+explained_variance_dataframe <- data.frame(explained_variance)
+rownames(explained_variance_dataframe) <- rownames(lasso_coefs_df)
+
+# 设置阈值（例如保留能够解释80%方差的特征）
+threshold_index <- which(explained_variance >= 0.8)[1]
+significant_features_4_mer <- rownames(lasso_coefs_df)[1:threshold_index]
+significant_features_4_mer <- data.frame(significant_features_4_mer)
+write.csv(significant_features_4_mer,"significant_features_4_mer.csv",row.names = FALSE)
+
+X_pca_significant_4mer <- X_pca[,c('Initial_value',significant_features_4_mer$significant_features_4_mer)]
+write.csv(X_pca_significant_4mer,"X_pca_significant_4mer.csv",row.names = FALSE)
+```
+
+# 5-mer
+
+```{r}
+library(readr)
+data_5mer <- read_csv("H99_all_genes_promoter_500nt_5mer_counts.csv")
+data_5mer <- as.data.frame(data_5mer)
+rownames(data_5mer) <- data_5mer$Gene
+data_5mer01 <- as.data.frame(scale(data_5mer[, -1])) 
+data_5mer01 <- cbind("Gene" = data_5mer$Gene,data_5mer01)
+
+merged_initial_expression <- read.csv("merged_initial_expression.csv")
+merged_initial_expression <- as.data.frame(merged_initial_expression)
+
+merged_data_5mer <- merge(merged_initial_expression, data_5mer01, by = "Gene")
+write.csv(merged_data_5mer,"merged_data_5mer.csv",row.names = FALSE)
+
+#筛选显著的motif
+# 构建线性混合效应模型
+response_5mer <- merged_data_5mer$Expression
+predictors_5mer <- merged_data_5mer[, c("initial_value",colnames(data_5mer)[-1])]  # 除去基因名列
+
+#使用LASSO回归选择合适的K-mer数据
+# 准备 LASSO 分析的数据
+library(glmnet)
+X <- as.matrix(merged_data_5mer[, c("initial_value",colnames(data_5mer)[-1])])
+merged_data_5mer <- read.csv("merged_data_5mer.csv")
+merged_data_5mer <- data.frame(merged_data_5mer)
+y <- merged_data_5mer$Expression
+
+
+```
+
+```{r}
+###如果不经过任何处理直接进行LASSO筛选
+# 计算相关矩阵
+cor_matrix <- cor(X)
+
+library(caret)
+# 找到高度相关的特征（相关性大于0.9）
+high_cor_features <- findCorrelation(cor_matrix, cutoff = 0.6)
+
+# 移除高度相关的特征
+X_filtered <- X[, -high_cor_features]
+
+library(dplyr)
+#剔除反向互补的序列
+# 函数：生成反向互补序列
+reverse_complement <- function(sequence) {
+  complement <- chartr("ACGT", "TGCA", sequence)
+  return(paste(rev(strsplit(complement, NULL)[[1]]), collapse = ""))
+}
+
+# 函数：筛选不存在反向互补序列的K-mer
+filter_reverse_complements <- function(kmer_df) {
+  # 检查是否存在名为 "kmer" 的列
+  if (!"kmer" %in% colnames(kmer_df)) {
+    stop("数据框中不存在名为 'kmer' 的列")
+  }
+  
+  unique_kmers <- c()
+  seen_kmers <- c()
+  
+  for (kmer in kmer_df$kmer) {
+    rev_comp <- reverse_complement(kmer)
+    if (!(kmer %in% seen_kmers) && !(rev_comp %in% seen_kmers)) {
+      unique_kmers <- c(unique_kmers, kmer)
+      seen_kmers <- c(seen_kmers, kmer, rev_comp)
+    }
+  }
+  
+  # 返回筛选后的数据框
+  return(kmer_df %>% filter(kmer %in% unique_kmers))
+}
+
+filtered_5mer <- data.frame(kmer = colnames(X_filtered)[-1])
+filtered_5mer01 <- filter_reverse_complements(filtered_5mer)
+
+
+```
+
+```{r}
+# 执行PCA
+pca <- prcomp(X_filtered[,filtered_5mer01$kmer], scale. = TRUE)
+
+# 加载必要的库
+library(ggplot2)
+
+# 提取方差比例
+pca_var <- pca$sdev^2
+pca_var_ratio <- pca_var / sum(pca_var)
+
+# 创建数据框
+pca_var_df <- data.frame(PC = 1:length(pca_var_ratio), Variance = pca_var_ratio)
+
+# 绘制折线图
+ggplot(pca_var_df, aes(x = PC, y = Variance)) +
+  geom_line(color = "blue") +
+  geom_point(color = "blue") +
+  labs(title = "PCA Variance Explained", x = "Principal Component", y = "Variance Explained") +
+  theme_minimal()
+
+
+
+# 选择前几个主要成分
+X_pca <- cbind(X_filtered[,1],pca$x)
+X_pca <- data.frame(X_pca)
+colnames(X_pca)[1] <- "Initial_value"
+write.csv(X_pca,"X_pca_5mer.csv",row.names = FALSE)
+
+X_pca <- read.csv("X_pca_5mer.csv")
+X_pca <- data.frame(X_pca)
+
+# 使用交叉验证选择最优的alpha值和lambda值
+# 定义alpha值的序列
+alpha_values <- seq(0, 1, by = 0.01)
+
+# 初始化存储交叉验证结果的列表
+cv_results <- list()
+X_pca <- as.matrix(X_pca)
+
+# 定义结果存储列表
+min_mse <- Inf
+best_alpha <- NULL
+best_lambda <- NULL
+
+# 对每个alpha值进行交叉验证
+for (alpha_val in alpha_values) {
+  print(paste("Fitting model for alpha:", alpha_val))
+  cv_model <- cv.glmnet(X_pca, y, nfolds = 10, alpha = alpha_val)
+  cv_results[[as.character(alpha_val)]] <- cv_model
+  
+  # 提取最优的lambda值和MSE
+  min_mse_alpha <- min(cv_model$cvm)
+  if (min_mse_alpha < min_mse) {
+    min_mse <- min_mse_alpha
+    best_alpha <- alpha_val
+    best_lambda <- cv_model$lambda.min
+  }
+}
+
+lasso_result_5mer <- data.frame(name=c("alpha","lambda","mse"),value=c(best_alpha,best_lambda,best_mse))
+write.csv(lasso_result_5mer,"lasso_result_5mer.csv",row.names = FALSE)
+# 使用最佳alpha值和lambda值重新拟合模型
+elastic_net_model <- glmnet(X_pca, y, alpha = best_alpha, lambda = best_lambda)
+
+# 输出模型系数
+coef(elastic_net_model)
+
+```
+
+```{r}
+# 提取LASSO回归系数
+lasso_coefs <- coef(elastic_net_model)
+
+# 将系数转换为数据框并去掉截距项
+lasso_coefs_df <- as.data.frame(as.matrix(lasso_coefs))
+lasso_coefs_df <- lasso_coefs_df[c(-1,-2), , drop = FALSE]  # 去掉截距项
+
+# 按照系数的绝对值从大到小排序
+lasso_coefs_df$abs_coef <- abs(lasso_coefs_df[, 1])
+lasso_coefs_df <- lasso_coefs_df[order(-lasso_coefs_df$abs_coef), , drop = FALSE]
+
+# 累积解释的方差
+explained_variance <- cumsum(lasso_coefs_df$abs_coef / sum(lasso_coefs_df$abs_coef))
+
+# 画出各个自变量对总体方差的解释程度
+plot(explained_variance, type = "b", pch = 19, col = "blue",
+     xlab = "Number of Features", ylab = "Cumulative Explained Variance",
+     main = "Explained Variance by LASSO Features")
+
+# 添加y=0.8的虚线辅助线
+abline(h = 0.8, col = "red", lty = 2)
+# 添加y=0.6的虚线辅助线
+abline(h = 0.6, col = "red", lty = 2)
+
+explained_variance_dataframe <- data.frame(explained_variance)
+rownames(explained_variance_dataframe) <- rownames(lasso_coefs_df)
+
+# 设置阈值（例如保留能够解释80%方差的特征）
+threshold_index <- which(explained_variance >= 0.8)[1]
+significant_features_5_mer <- rownames(lasso_coefs_df)[1:threshold_index]
+significant_features_5_mer <- data.frame(significant_features_5_mer)
+write.csv(significant_features_5_mer,"significant_features_5_mer.csv",row.names = FALSE)
+
+X_pca_significant_5mer <- X_pca[,c('Initial_value',significant_features_5_mer$significant_features_5_mer)]
+write.csv(X_pca_significant_5mer,"X_pca_significant_5mer.csv",row.names = FALSE)
+
+ 
+```
+
+```{r}
+
+# 打印最佳的alpha和lambda值
+print(paste("Best alpha:", best_alpha))
+print(paste("Best lambda:", best_lambda))
+
+# 可视化结果
+plot(cv_results[[as.character(best_alpha)]])
+```

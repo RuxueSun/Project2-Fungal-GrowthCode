@@ -1,0 +1,402 @@
+---
+title: "Rcode1"
+author: "Ruxue Sun"
+date: "2024-07-23"
+output: html_document
+---
+
+# Q1.GLM
+
+```{r}
+#1.读取数据
+# 加载必要的库
+library(DESeq2)
+library(readr)
+library(tidyverse)
+library(MASS)
+library(ggplot2)
+library(car)
+
+# 读取数据文件
+counts_all <- read_csv('counts_all.csv')
+samplesheet <- read_csv('Gat201_samplesheet.csv')
+
+# 将tibble转换为data frame
+counts_all <- as.data.frame(counts_all)
+samplesheet <- as.data.frame(samplesheet)
+
+# 设置行名
+rownames(counts_all) <- counts_all$Geneid
+#去除包含0的行，某行人意数据包含0 都不行，视为异常值，直接去除
+filtered_counts_all<-counts_all[rowSums(counts_all ==0) ==0,]
+counts_all_without_names <- counts_all[,c(-1,-2,-3,-4,-5,-6)]
+# 样本表格设置行名
+rownames(samplesheet) <- samplesheet$Title
+samplesheet_without_ids <- samplesheet[,c(-1,-2,-3,-6,-8)]
+
+# 将必要的列转换为因子类型
+samplesheet_without_ids$GAT201 <- as.factor(samplesheet_without_ids$GAT201)
+samplesheet_without_ids$Condition <- as.factor(samplesheet_without_ids$Condition)
+samplesheet_without_ids$BioRep <- as.factor(samplesheet_without_ids$BioRep)
+
+# 创建DESeq2对象
+dds <- DESeqDataSetFromMatrix(countData = counts_all_without_names,
+                              colData = samplesheet_without_ids,
+                              design = ~ GAT201 + Condition + BioRep)
+
+
+# 过滤掉低表达基因
+dds <- dds[rowSums(counts(dds)) > 10,]
+
+# 运行DESeq2进行标准化
+dds <- DESeq(dds)
+vsd <- vst(dds, blind = FALSE)
+
+# 提取标准化后的表达数据
+expression_data_standardized <- assay(vsd)
+```
+
+```{r}
+#因为之前对数据做PCA之后聚类的结果显示，不同时间下的表达数据显著不同，
+#而其余条件没有做到全部的基因显著不同，因此使用时间作为自变量更合适
+#因此将时间作为一个自变量，其余条件固定，探索基因的表达数据建模
+#需要把各个时间点的数据筛选出来
+
+# 提取时间点30的数据
+time30_samples <- colnames(counts_all_without_names)[grepl("_30_", colnames(counts_all_without_names))]
+initial_samples <- colnames(counts_all_without_names)[grepl("_Y_0_", colnames(counts_all_without_names))]
+
+# 提取时间点120的数据
+time120_samples <- colnames(counts_all_without_names)[grepl("_120_", colnames(counts_all_without_names))]
+
+# 提取时间点240的数据
+time240_samples <- colnames(counts_all_without_names)[grepl("_240_", colnames(counts_all_without_names))]
+
+expression_data_standardized_0 <- expression_data_standardized[,initial_samples]
+expression_data_standardized_30 <- expression_data_standardized[,time30_samples]
+expression_data_standardized_120 <- expression_data_standardized[,time120_samples]
+expression_data_standardized_240 <- expression_data_standardized[,time240_samples]
+
+expression_data_standardized_0_A <- expression_data_standardized_0[,1:2]
+expression_data_standardized_0_a <- expression_data_standardized_0[,3:4]
+expression_data_standardized_0_B <- expression_data_standardized_0[,5:6]
+expression_data_standardized_0_M <- expression_data_standardized_0[,7:8]
+
+expression_data_standardized_30_A_R <- expression_data_standardized_30[,1:2]
+expression_data_standardized_30_A_RS <- expression_data_standardized_30[,3:4]
+expression_data_standardized_30_a_R <- expression_data_standardized_30[,5:6]
+expression_data_standardized_30_a_RS <- expression_data_standardized_30[,7:8]
+expression_data_standardized_30_B_R <- expression_data_standardized_30[,9:10]
+expression_data_standardized_30_B_RS <- expression_data_standardized_30[,11:12]
+expression_data_standardized_30_M_R <- expression_data_standardized_30[,13:14]
+expression_data_standardized_30_M_RS <- expression_data_standardized_30[,15:16]
+
+expression_data_standardized_120_A_R <- expression_data_standardized_120[,1:2]
+expression_data_standardized_120_A_RS <- expression_data_standardized_120[,3:4]
+expression_data_standardized_120_a_R <- expression_data_standardized_120[,5:6]
+expression_data_standardized_120_a_RS <- expression_data_standardized_120[,7:8]
+expression_data_standardized_120_B_R <- expression_data_standardized_120[,9:10]
+expression_data_standardized_120_B_RS <- expression_data_standardized_120[,11:12]
+expression_data_standardized_120_M_R <- expression_data_standardized_120[,13:14]
+expression_data_standardized_120_M_RS <- expression_data_standardized_120[,15:16]
+
+expression_data_standardized_240_A_R <- expression_data_standardized_240[,1:2]
+expression_data_standardized_240_A_RS <- expression_data_standardized_240[,3:4]
+expression_data_standardized_240_a_R <- expression_data_standardized_240[,5:6]
+expression_data_standardized_240_a_RS <- expression_data_standardized_240[,7:8]
+expression_data_standardized_240_B_R <- expression_data_standardized_240[,9:10]
+expression_data_standardized_240_B_RS <- expression_data_standardized_240[,11:12]
+expression_data_standardized_240_M_R <- expression_data_standardized_240[,13:14]
+expression_data_standardized_240_M_RS <- expression_data_standardized_240[,15:16]
+```
+
+```{r}
+# 准备数据框，将初始样本值和30分钟条件下的表达数据整合在一起
+data_for_model <- data.frame(
+  InitialSample = as.vector(expression_data_standardized_0_A),
+  Expression = as.vector(expression_data_standardized_30_A_R)
+)
+
+# 拟合GLM模型
+fit_with_initial_30_A_R <- glm.nb(Expression ~ InitialSample, data = data_for_model)
+
+# 查看模型摘要
+summary(fit_with_initial_30_A_R)
+```
+
+```{r}
+#由于建模过程和建模的结果都显示，对于VST转换后的数据，使用负二项分布进行回归不合适，
+#因此使用高斯分布
+# 拟合GLM模型，使用高斯分布
+fit_with_initial_30_A_R_gaussian <- glm(Expression ~ InitialSample, data = data_for_model, family = gaussian())
+
+# 查看模型摘要
+summary(fit_with_initial_30_A_R_gaussian)
+
+
+
+
+# 1. 拟合曲线图
+ggplot(fit_with_initial_30_A_R_gaussian, aes(x = InitialSample, y = Expression)) +
+  geom_point() +
+  geom_smooth(method = "glm", method.args = list(family = "gaussian"), se = FALSE, color = "blue") +
+  labs(title = "GLM Fit for InitialSample vs Expression at 30 minutes",
+       x = "Initial Sample",
+       y = "Expression") +
+  theme_minimal()
+
+# 2. 残差图
+ggplot(fit_with_initial_30_A_R_gaussian, aes(x = fit_with_initial_30_A_R_gaussian$fitted.values, y = residuals(fit_with_initial_30_A_R_gaussian))) +
+  geom_point() +
+  labs(title = "Residuals vs Fitted",
+       x = "Fitted Values",
+       y = "Residuals") +
+  theme_minimal()
+
+
+# 3. Cook's Distance图
+cooksd <- cooks.distance(fit_with_initial_30_A_R_gaussian)
+ggplot(data_for_model, aes(x = seq_along(cooksd), y = cooksd)) +
+  geom_bar(stat="identity") +
+  labs(title = "Cook's Distance",
+       x = "Observation",
+       y = "Cook's Distance") +
+  theme_minimal()
+```
+
+```{r}
+get_glm_gaussian_models <- function(initial_variables,dependent_variables){
+  data_for_model <- data.frame(
+    InitialSample = as.vector(initial_variables),
+    Expression = as.vector(dependent_variables)
+  )
+  result <- glm(Expression ~ InitialSample, data = data_for_model, family = gaussian())
+  return(result)
+}
+```
+
+```{r}
+####################################################
+#时间为30的
+fit_with_initial_30_A_R <- get_glm_gaussian_models(expression_data_standardized_0_A,expression_data_standardized_30_A_R)
+summary(fit_with_initial_30_A_R)
+
+fit_with_initial_30_A_RS <- get_glm_gaussian_models(expression_data_standardized_0_A, expression_data_standardized_30_A_RS)
+summary(fit_with_initial_30_A_RS)
+
+fit_with_initial_30_a_R <- get_glm_gaussian_models(expression_data_standardized_0_a,expression_data_standardized_30_a_R)
+summary(fit_with_initial_30_a_R)
+
+fit_with_initial_30_a_RS <- get_glm_gaussian_models(expression_data_standardized_0_a,expression_data_standardized_30_a_RS)
+summary(fit_with_initial_30_a_RS)
+
+fit_with_initial_30_B_R <- get_glm_gaussian_models(expression_data_standardized_0_B,expression_data_standardized_30_B_R)
+summary(fit_with_initial_30_B_R)
+
+fit_with_initial_30_B_RS <- get_glm_gaussian_models(expression_data_standardized_0_B,expression_data_standardized_30_B_RS)
+summary(fit_with_initial_30_B_RS)
+
+fit_with_initial_30_M_R <- get_glm_gaussian_models(expression_data_standardized_0_M,expression_data_standardized_30_M_R)
+summary(fit_with_initial_30_M_R)
+
+fit_with_initial_30_M_RS <- get_glm_gaussian_models(expression_data_standardized_0_M,expression_data_standardized_30_M_RS)
+summary(fit_with_initial_30_M_RS)
+
+
+#B_R_30
+# 1. 拟合曲线图
+ggplot(fit_with_initial_30_M_RS, aes(x = InitialSample, y = Expression)) +
+  geom_point() +
+  geom_smooth(method = "glm", method.args = list(family = "gaussian"), se = FALSE, color = "blue") +
+  labs(title = "GLM Fit for InitialSample vs Expression at M_RS_30",
+       x = "Initial Sample",
+       y = "Expression") +
+  theme_minimal()
+
+# 2. 残差图
+ggplot(fit_with_initial_30_M_RS, aes(x = fit_with_initial_30_M_RS$fitted.values, y = residuals(fit_with_initial_30_M_RS))) +
+  geom_point() +
+  labs(title = "Residuals vs Fitted",
+       x = "Fitted Values",
+       y = "Residuals") +
+  theme_minimal()
+
+
+# 4. Cook's Distance图
+cooksd <- cooks.distance(fit_with_initial_30_M_RS)
+ggplot(data_for_model, aes(x = seq_along(cooksd), y = cooksd)) +
+  geom_bar(stat="identity") +
+  labs(title = "Cook's Distance",
+       x = "Observation",
+       y = "Cook's Distance") +
+   coord_cartesian(ylim = c(0, 0.002))
+  theme_minimal()
+
+
+
+```
+
+```{r}
+##################################
+#时间为120的
+fit_with_initial_120_A_R <- get_glm_gaussian_models(expression_data_standardized_0_A,expression_data_standardized_120_A_R)
+summary(fit_with_initial_120_A_R)
+
+fit_with_initial_120_A_RS <- get_glm_gaussian_models(expression_data_standardized_0_A, expression_data_standardized_120_A_RS)
+summary(fit_with_initial_120_A_RS)
+
+fit_with_initial_120_a_R <- get_glm_gaussian_models(expression_data_standardized_0_a,expression_data_standardized_120_a_R)
+summary(fit_with_initial_120_a_R)
+
+fit_with_initial_120_a_RS <- get_glm_gaussian_models(expression_data_standardized_0_a,expression_data_standardized_120_a_RS)
+summary(fit_with_initial_120_a_RS)
+
+fit_with_initial_120_B_R <- get_glm_gaussian_models(expression_data_standardized_0_B,expression_data_standardized_120_B_R)
+summary(fit_with_initial_120_B_R)
+
+fit_with_initial_120_B_RS <- get_glm_gaussian_models(expression_data_standardized_0_B,expression_data_standardized_120_B_RS)
+summary(fit_with_initial_120_B_RS)
+
+fit_with_initial_120_M_R <- get_glm_gaussian_models(expression_data_standardized_0_M,expression_data_standardized_120_M_R)
+summary(fit_with_initial_120_M_R)
+
+fit_with_initial_120_M_RS <- get_glm_gaussian_models(expression_data_standardized_0_M,expression_data_standardized_120_M_RS)
+summary(fit_with_initial_120_M_RS)
+
+#B_R_120
+# 1. 拟合曲线图
+ggplot(fit_with_initial_120_M_RS, aes(x = InitialSample, y = Expression)) +
+  geom_point() +
+  geom_smooth(method = "glm", method.args = list(family = "gaussian"), se = FALSE, color = "blue") +
+  labs(title = "GLM Fit for InitialSample vs Expression at M_RS_120",
+       x = "Initial Sample",
+       y = "Expression") +
+  theme_minimal()
+
+# 2. 残差图
+ggplot(fit_with_initial_120_A_RS, aes(x = fit_with_initial_120_A_RS$fitted.values, y = residuals(fit_with_initial_120_A_RS))) +
+  geom_point() +
+  labs(title = "Residuals vs Fitted",
+       x = "Fitted Values",
+       y = "Residuals") +
+  theme_minimal()
+
+
+# 4. Cook's Distance图
+cooksd <- cooks.distance(fit_with_initial_120_A_RS)
+ggplot(data_for_model, aes(x = seq_along(cooksd), y = cooksd)) +
+  geom_bar(stat="identity") +
+  labs(title = "Cook's Distance",
+       x = "Observation",
+       y = "Cook's Distance") +
+  theme_minimal()
+```
+
+```{r}
+##################################
+#时间为240的
+
+
+fit_with_initial_240_A_R <- get_glm_gaussian_models(expression_data_standardized_0_A,expression_data_standardized_240_A_R)
+summary(fit_with_initial_240_A_R)
+
+fit_with_initial_240_A_RS <- get_glm_gaussian_models(expression_data_standardized_0_A, expression_data_standardized_240_A_RS)
+summary(fit_with_initial_240_A_RS)
+
+fit_with_initial_240_a_R <- get_glm_gaussian_models(expression_data_standardized_0_a,expression_data_standardized_240_a_R)
+summary(fit_with_initial_240_a_R)
+
+fit_with_initial_240_a_RS <- get_glm_gaussian_models(expression_data_standardized_0_a,expression_data_standardized_240_a_RS)
+summary(fit_with_initial_240_a_RS)
+
+fit_with_initial_240_B_R <- get_glm_gaussian_models(expression_data_standardized_0_B,expression_data_standardized_240_B_R)
+summary(fit_with_initial_240_B_R)
+
+fit_with_initial_240_B_RS <- get_glm_gaussian_models(expression_data_standardized_0_B,expression_data_standardized_240_B_RS)
+summary(fit_with_initial_240_B_RS)
+
+fit_with_initial_240_M_R <- get_glm_gaussian_models(expression_data_standardized_0_M,expression_data_standardized_240_M_R)
+summary(fit_with_initial_240_M_R)
+
+fit_with_initial_240_M_RS <- get_glm_gaussian_models(expression_data_standardized_0_M,expression_data_standardized_240_M_RS)
+summary(fit_with_initial_240_M_RS)
+
+
+
+#B_R_240
+# 1. 拟合曲线图
+ggplot(fit_with_initial_240_a_R, aes(x = InitialSample, y = Expression)) +
+  geom_point() +
+  geom_smooth(method = "glm", method.args = list(family = "gaussian"), se = FALSE, color = "blue") +
+  labs(title = "GLM Fit for InitialSample vs Expression at a_R_240",
+       x = "Initial Sample",
+       y = "Expression") +
+  theme_minimal()
+
+# 2. 残差图
+ggplot(fit_with_initial_240_a_R, aes(x = fit_with_initial_240_a_R$fitted.values, y = residuals(fit_with_initial_240_a_R))) +
+  geom_point() +
+  labs(title = "Residuals vs Fitted",
+       x = "Fitted Values",
+       y = "Residuals") +
+  theme_minimal()
+
+
+# 3. Cook's Distance图
+cooksd <- cooks.distance(fit_with_initial_240_a_R)
+ggplot(data_for_model, aes(x = seq_along(cooksd), y = cooksd)) +
+  geom_bar(stat="identity") +
+  labs(title = "Cook's Distance",
+       x = "Observation",
+       y = "Cook's Distance") +
+  theme_minimal()
+
+
+###################
+```
+
+# 异常值B_R
+
+```{r}
+
+fit_with_initial_30_B_R <- get_glm_gaussian_models(expression_data_standardized_0_B,expression_data_standardized_30_B_R)
+summary(fit_with_initial_30_B_R)
+
+fit_with_initial_120_B_R <- get_glm_gaussian_models(expression_data_standardized_0_B,expression_data_standardized_120_B_R)
+summary(fit_with_initial_120_B_R)
+
+fit_with_initial_240_B_R <- get_glm_gaussian_models(expression_data_standardized_0_B,expression_data_standardized_240_B_R)
+summary(fit_with_initial_240_B_R)
+
+
+
+
+# 1. 拟合曲线图
+ggplot(fit_with_initial_120_B_R, aes(x = InitialSample, y = Expression)) +
+  geom_point() +
+  geom_smooth(method = "glm", method.args = list(family = "gaussian"), se = FALSE, color = "blue") +
+  labs(title = "GLM Fit for InitialSample vs Expression at B_R_120",
+       x = "Initial Sample",
+       y = "Expression") +
+  theme_minimal()
+
+# 2. 残差图
+ggplot(fit_with_initial_120_B_R, aes(x = fit_with_initial_120_B_R$fitted.values, y = residuals(fit_with_initial_120_B_R))) +
+  geom_point() +
+  labs(title = "Residuals vs Fitted",
+       x = "Fitted Values",
+       y = "Residuals") +
+  theme_minimal()
+
+
+# 3. Cook's Distance图
+cooksd <- cooks.distance(fit_with_initial_120_B_R)
+ggplot(data_for_model, aes(x = seq_along(cooksd), y = cooksd)) +
+  geom_bar(stat="identity") +
+  labs(title = "Cook's Distance",
+       x = "Observation",
+       y = "Cook's Distance") +
+  coord_cartesian(ylim = c(0, 0.004))
+  theme_minimal()
+
+```
